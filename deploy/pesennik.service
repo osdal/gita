@@ -1,0 +1,25 @@
+[Unit]
+Description=Pesennik Telegram Mini App
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/pesennik
+EnvironmentFile=-/etc/pesennik.env
+Environment=APP_HOST=127.0.0.1
+Environment=PORT=8100
+Environment=PESENNIK_CATALOG_DB=/var/lib/pesennik/catalog.sqlite3
+Environment=APP_STATE_FILE=/var/lib/pesennik/app_state.json
+ExecStart=/usr/bin/python3 /opt/pesennik/server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pesennik
+
+[Install]
+WantedBy=multi-user.target

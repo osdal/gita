@@ -1,0 +1,39 @@
+# Local administration state can contain private data and editor overrides.
+app_state.json
+
+# Secrets and local environment configuration.
+.env
+.env.*
+!.env.example
+
+# Python and OCR runtime artifacts.
+__pycache__/
+*.py[cod]
+ocr_models/
+ocr_debug.txt
+ggg_ocr__gu0oz1w.*
+
+# Temporary inspections and local build output.
+tmp/
+tmp-frontmatter.txt
+dist/
+build/
+
+# Temporary OCR page previews
+tmp-stanza-*.png
+
+# Local database files
+*.sqlite3
+*.db
+# Private source dataset (kept on the server, not in the public repository)
+Гаудиа*.pdf
+catalog_draft.csv
+index_aliases_draft.csv
+ocr_page_fragments.csv
+ocr_text_draft.csv
+text_extraction_manifest.csv
+text_extraction_notes.md
+text_review_queue.csv
+text_stitch_review.csv
+text_stitched_draft.csv
+work_alias_review.csv
