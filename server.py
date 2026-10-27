@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import hashlib
 import hmac
 import json
@@ -10,6 +11,7 @@ import re
 import secrets
 import sqlite3
 import time
+from html.parser import HTMLParser
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +65,68 @@ def save_state(data: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
+
+
+class RichTextSanitizer(HTMLParser):
+    """Keep a small formatting allowlist for admin-authored rich text."""
+    allowed = {"p", "div", "br", "hr", "strong", "b", "em", "i", "u", "s", "del", "span", "ul", "ol", "li", "blockquote", "h2", "h3", "h4", "a"}
+    void = {"br", "hr"}
+    blocked = {"script", "style", "iframe", "object", "embed", "svg", "math"}
+    safe_classes = {"poem-block", "poem-verse", "poem-prose", "poem-meta"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.output: list[str] = []
+        self.stack: list[str] = []
+        self.blocked_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if self.blocked_depth:
+            if tag in self.blocked: self.blocked_depth += 1
+            return
+        if tag in self.blocked:
+            self.blocked_depth = 1
+            return
+        if tag not in self.allowed: return
+        safe_attrs = []
+        values = dict(attrs)
+        if tag == "a":
+            href = str(values.get("href", "")).strip()
+            parsed = urlparse(href)
+            if href and (parsed.scheme.lower() in ("http", "https", "mailto") or (not parsed.scheme and not href.startswith("//"))):
+                safe_attrs.append(("href", href))
+        style = str(values.get("style", ""))
+        alignment = re.search(r"(?:^|;)\s*text-align\s*:\s*(left|center|right|justify)\s*(?:;|$)", style, re.I)
+        if alignment: safe_attrs.append(("style", f"text-align:{alignment.group(1).lower()}"))
+        classes = [name for name in str(values.get("class", "")).split() if name in self.safe_classes]
+        if classes: safe_attrs.append(("class", " ".join(classes)))
+        attr_text = "".join(f' {name}="{html.escape(value, quote=True)}"' for name, value in safe_attrs)
+        self.output.append(f"<{tag}{attr_text}>")
+        if tag not in self.void: self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if self.blocked_depth:
+            if tag in self.blocked: self.blocked_depth -= 1
+            return
+        if tag not in self.stack: return
+        while self.stack:
+            current = self.stack.pop()
+            self.output.append(f"</{current}>")
+            if current == tag: break
+
+    def handle_data(self, data):
+        if not self.blocked_depth: self.output.append(html.escape(data))
+
+    def value(self) -> str:
+        while self.stack: self.output.append(f"</{self.stack.pop()}>")
+        return "".join(self.output)
+
+
+def sanitize_rich_text(value) -> str:
+    parser = RichTextSanitizer()
+    parser.feed(str(value or ""))
+    parser.close()
+    return parser.value()
 
 
 def verify_init_data(raw: str) -> dict | None:
@@ -237,7 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             work = next((w for w in WORKS if w["work_id"] == wid), None)
             if not work: self.send_json({"error": "Произведение не найдено"}, 404); return
             current = state(); overrides = current.setdefault("work_overrides", {})
-            patch = {k: str(data[k]) for k in ("title", "author", "text", "theme", "genre", "text_status") if k in data}
+            patch = {k: str(data[k]) for k in ("title", "author", "theme", "genre", "text_status") if k in data}
+            if "text" in data: patch["text"] = sanitize_rich_text(data["text"])
             if "title_aliases" in data:
                 if not isinstance(data["title_aliases"], list): self.send_json({"error": "Варианты заглавия должны быть списком"}, 400); return
                 patch["title_aliases"] = list(dict.fromkeys(str(a).strip() for a in data["title_aliases"] if str(a).strip()))
@@ -279,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "У страниц должны быть уникальные ID из латинских букв, цифр, _ и -"}, 400); return
             if any(not isinstance(x.get("title"), str) or not x["title"].strip() for x in data["items"]):
                 self.send_json({"error": "У каждой страницы должно быть название"}, 400); return
-            current[key] = data["items"]
+            current[key] = [{**item, "content": sanitize_rich_text(item.get("content", ""))} for item in data["items"]]
             valid_page_ids = {x["id"] for x in data["items"]} | {"catalog"}
             current["banners"]["by_page"] = {pid: items for pid, items in current["banners"].get("by_page", {}).items() if pid in valid_page_ids}
         elif key == "banners":
@@ -294,7 +359,12 @@ class Handler(BaseHTTPRequestHandler):
                     value = str(banner.get(field, "")).strip()
                     if value and urlparse(value).scheme not in ("https", "http"):
                         self.send_json({"error": "Для ссылок и изображений разрешены только http:// и https://"}, 400); return
-            current[key] = data["items"]
+            current[key] = {"global": [
+                {**banner, "text": sanitize_rich_text(banner.get("text", ""))} for banner in banners.get("global", [])
+            ], "by_page": {
+                pid: [{**banner, "text": sanitize_rich_text(banner.get("text", ""))} for banner in group]
+                for pid, group in banners.get("by_page", {}).items()
+            }}
         save_state(current); self.send_json({"ok": True})
 
 
