@@ -69,10 +69,10 @@ def save_state(data: dict) -> None:
 
 class RichTextSanitizer(HTMLParser):
     """Keep a small formatting allowlist for admin-authored rich text."""
-    allowed = {"p", "div", "br", "hr", "strong", "b", "em", "i", "u", "s", "del", "span", "ul", "ol", "li", "blockquote", "h2", "h3", "h4", "a"}
-    void = {"br", "hr"}
+    allowed = {"p", "div", "br", "hr", "strong", "b", "em", "i", "u", "s", "del", "span", "ul", "ol", "li", "blockquote", "h2", "h3", "h4", "a", "img"}
+    void = {"br", "hr", "img"}
     blocked = {"script", "style", "iframe", "object", "embed", "svg", "math"}
-    safe_classes = {"poem-block", "poem-verse", "poem-prose", "poem-meta"}
+    safe_classes = {"poem-block", "poem-verse", "poem-prose", "poem-meta", "rich-image"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -95,6 +95,12 @@ class RichTextSanitizer(HTMLParser):
             parsed = urlparse(href)
             if href and (parsed.scheme.lower() in ("http", "https", "mailto") or (not parsed.scheme and not href.startswith("//"))):
                 safe_attrs.append(("href", href))
+        if tag == "img":
+            src = str(values.get("src", "")).strip()
+            parsed = urlparse(src)
+            if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+                return
+            safe_attrs.extend([("src", src), ("alt", str(values.get("alt", ""))[:300])])
         style = str(values.get("style", ""))
         alignment = re.search(r"(?:^|;)\s*text-align\s*:\s*(left|center|right|justify)\s*(?:;|$)", style, re.I)
         if alignment: safe_attrs.append(("style", f"text-align:{alignment.group(1).lower()}"))
