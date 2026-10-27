@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import csv
+from email import policy
+from email.parser import BytesParser
 import html
 import hashlib
 import hmac
@@ -28,6 +30,7 @@ ADMIN_SESSION_SECONDS = 12 * 60 * 60
 SESSIONS: dict[str, float] = {}
 LOGIN_FAILURES: dict[str, tuple[int, float]] = {}
 HOST, PORT = os.environ.get("APP_HOST", "127.0.0.1"), int(os.environ.get("PORT", "8100"))
+UPLOAD_DIR = Path(os.environ.get("PESENNIK_UPLOAD_DIR", "/var/lib/pesennik/uploads")).resolve()
 
 
 def read_csv(path: Path) -> list[dict]:
@@ -238,6 +241,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
+        image_match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:png|jpg|gif|webp))", u.path)
+        if image_match:
+            path = UPLOAD_DIR / image_match.group(1)
+            try: body = path.read_bytes()
+            except OSError: self.send_error(404); return
+            mime = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}[path.suffix[1:]]
+            self.send_response(200); self.send_header("Content-Type", mime); self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable"); self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers(); self.wfile.write(body); return
         if u.path == "/api/config":
             user, role = self.identity()
             current = state()
@@ -268,6 +280,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/api/admin/images":
+            self.upload_image(); return
         try: data = self.body()
         except Exception as e: self.send_json({"error": str(e)}, 400); return
         if self.path == "/api/login":
@@ -373,10 +387,41 @@ class Handler(BaseHTTPRequestHandler):
             }}
         save_state(current); self.send_json({"ok": True})
 
+    def upload_image(self):
+        if not any(self.allowed(p) for p in ("content.edit", "pages.manage", "banners.manage")):
+            self.send_json({"error": "Доступ запрещён"}, 403); return
+        try: length = int(self.headers.get("Content-Length", "0"))
+        except ValueError: self.send_json({"error": "Некорректный размер файла"}, 400); return
+        if length <= 0 or length > 8 * 1024 * 1024 + 65536:
+            self.send_json({"error": "Размер изображения не должен превышать 8 МБ"}, 413); return
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data;"):
+            self.send_json({"error": "Ожидалась загрузка файла изображения"}, 400); return
+        try:
+            raw = self.rfile.read(length)
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type.encode("ascii", "strict") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw
+            )
+            part = next((item for item in message.iter_parts() if item.get_param("name", header="content-disposition") == "image"), None)
+            image = part.get_payload(decode=True) if part else None
+        except Exception:
+            image = None
+        if not image or len(image) > 8 * 1024 * 1024:
+            self.send_json({"error": "Не удалось прочитать изображение (максимум 8 МБ)"}, 400); return
+        signatures = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF87a", "gif"), (b"GIF89a", "gif"))
+        extension = next((ext for magic, ext in signatures if image.startswith(magic)), None)
+        if not extension and len(image) >= 12 and image[:4] == b"RIFF" and image[8:12] == b"WEBP": extension = "webp"
+        if not extension:
+            self.send_json({"error": "Поддерживаются изображения PNG, JPEG, GIF и WebP"}, 415); return
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"{secrets.token_hex(16)}.{extension}"
+        (UPLOAD_DIR / filename).write_bytes(image)
+        self.send_json({"url": f"/uploads/{filename}"}, 201)
+
 
 class StaticHandler(Handler):
     def do_GET(self):
-        if self.path.startswith("/api/"): return super().do_GET()
+        if self.path.startswith("/api/") or self.path.startswith("/uploads/"): return super().do_GET()
         path = (ROOT / "web" / (self.path.lstrip("/") or "index.html")).resolve()
         web_root = (ROOT / "web").resolve()
         if not str(path).startswith(str(web_root) + os.sep) and path != web_root / "index.html": self.send_error(403); return
